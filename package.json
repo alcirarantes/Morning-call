@@ -1,0 +1,13 @@
+{
+  "name": "morning-call",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "generate": "node scripts/generate.js" },
+  "dependencies": {
+    "yahoo-finance2": "^2.11.0",
+    "node-fetch": "^3.3.2",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "date-fns": "^3.6.0"
+  }
+}
