@@ -1,11 +1,10 @@
 {
   "name": "morning-call",
   "version": "1.0.0",
-  "description": "Morning Call automático — Alcir Arantes · The Hill Capital · BTG Pactual",
+  "description": "Morning Call automático — Alcir Arantes",
   "type": "module",
   "scripts": {
-    "generate": "node scripts/generate.js",
-    "dev": "node scripts/generate.js --dev"
+    "generate": "node scripts/generate.js"
   },
   "dependencies": {
     "yahoo-finance2": "^2.11.0",
