@@ -1,0 +1,6 @@
+{
+  "version": 2,
+  "buildCommand": "node scripts/generate.js",
+  "outputDirectory": "public",
+  "installCommand": "npm install"
+}
