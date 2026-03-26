@@ -1,0 +1,739 @@
+---
+name: morning-call-scraper
+description: >
+  Executa coleta automatizada de dados de mercado e gera o Morning Call diário
+  com todos os dados atualizados. Use esta skill SEMPRE que o usuário pedir
+  "gera o morning call de hoje", "atualiza o relatório", "busca os dados de hoje"
+  ou qualquer variação. Também deve disparar às 7h e 14h via agendamento.
+---
+
+# Morning Call Scraper — Skill Completa
+
+## O Que Esta Skill Faz
+
+Coleta todos os dados necessários para preencher o Morning Call do Alcir Arantes,
+organiza por categoria, gera o HTML final com os dados do dia e salva em disco.
+
+Funciona em dois modos:
+- **Manual:** usuário pede e Claude executa agora
+- **Agendado:** script Node.js roda via cron às 7h00 e 14h00
+
+---
+
+## Mapa Completo de Dados do HTML
+
+A varredura identificou **6 categorias de dados**, **47 campos numéricos** e
+**2 blocos de texto analítico** que precisam ser coletados ou gerados.
+
+### CATEGORIA 1 — TICKER BAR (8 campos)
+| Campo | Tipo | Fonte |
+|---|---|---|
+| IBOV fechamento anterior | Número + variação % | Yahoo Finance / BCB SGS |
+| IBOV tempo real (abertura) | Número + variação % | Yahoo Finance |
+| USD/BRL | Número + variação % | BCB API pública |
+| S&P 500 Futuro | Número + variação % | Yahoo Finance |
+| Brent (petróleo) | Número + variação % | Yahoo Finance (BZ=F) |
+| Selic atual | Número + variação pp | BCB API (série 432) |
+| VIX | Número + variação % | Yahoo Finance (^VIX) |
+| Bitcoin (BTC/USD) | Número + variação % | CoinGecko API gratuita |
+
+### CATEGORIA 2 — FUTUROS EUA + EUROPA (8 campos)
+| Campo | Tipo | Fonte |
+|---|---|---|
+| US 30 (Dow Jones Futuro) | Número + variação % | Yahoo Finance (YM=F) |
+| S&P 500 Futuro | Número + variação % | Yahoo Finance (ES=F) |
+| Nasdaq 100 Futuro | Número + variação % | Yahoo Finance (NQ=F) |
+| Small Cap 2000 Futuro | Número + variação % | Yahoo Finance (RTY=F) |
+| VIX | Número + variação % | Yahoo Finance (^VIX) |
+| DAX | Número + variação % | Yahoo Finance (^GDAXI) |
+| FTSE 100 | Número + variação % | Yahoo Finance (^FTSE) |
+| CAC 40 | Número + variação % | Yahoo Finance (^FCHI) |
+
+### CATEGORIA 3 — TREASURIES EUA (3 campos)
+| Campo | Tipo | Fonte |
+|---|---|---|
+| T2Y (yield 2 anos) | % + variação bps | Yahoo Finance (^IRX) / FRED API |
+| T10Y (yield 10 anos) | % + variação bps | Yahoo Finance (^TNX) / FRED API |
+| T30Y (yield 30 anos) | % + variação bps | Yahoo Finance (^TYX) / FRED API |
+
+### CATEGORIA 4 — COMMODITIES (6 campos)
+| Campo | Tipo | Fonte |
+|---|---|---|
+| Brent | US$ + variação % | Yahoo Finance (BZ=F) |
+| WTI | US$ + variação % | Yahoo Finance (CL=F) |
+| Ouro | US$ + variação % | Yahoo Finance (GC=F) |
+| Prata | US$ + variação % | Yahoo Finance (SI=F) |
+| Cobre | US$ + variação % | Yahoo Finance (HG=F) |
+| Minério de Ferro | US$ + variação % | Yahoo Finance (TIOQ25.SG) ou scrape Investing |
+
+### CATEGORIA 5 — CÂMBIO + CRIPTO (6 campos)
+| Campo | Tipo | Fonte |
+|---|---|---|
+| DXY (dólar índice) | Número + variação % | Yahoo Finance (DX-Y.NYB) |
+| EUR/USD | Número + variação % | Yahoo Finance (EURUSD=X) |
+| GBP/USD | Número + variação % | Yahoo Finance (GBPUSD=X) |
+| USD/JPY | Número + variação % | Yahoo Finance (JPY=X) |
+| Bitcoin (BTC) | US$ + variação % | CoinGecko API gratuita |
+| Ethereum (ETH) | US$ + variação % | CoinGecko API gratuita |
+
+### CATEGORIA 6 — INDICADORES MACRO (dados dos cards de análise)
+| Campo | Tipo | Fonte |
+|---|---|---|
+| IPCA-15 resultado | % | IBGE API / scrape Agência IBGE |
+| IPCA-15 expectativa | % | Broadcast/Focus (quando disponível) |
+| IPCA-15 anterior | % | BCB SGS série 13522 |
+| IPCA-15 acum. 12m | % | BCB SGS / IBGE |
+| Seguro-desemprego EUA (initial claims) | Mil + variação | FRED API (ICSA) |
+| Seguro-desemprego EUA (continuing) | Milhões | FRED API (CCSA) |
+| Selic vigente | % | BCB API série 432 |
+| Focus: IPCA projetado | % | BCB API Focus |
+| Focus: Selic terminal | % | BCB API Focus |
+| Fluxo cambial | US$ bi | BCB nota cambial (scrape) |
+
+### BLOCO DE TEXTO — Notícias e Análise (gerado por IA)
+- Panorama do dia (2 parágrafos)
+- Bullets Brasil (5-6 itens)
+- Bullets Internacional (4 itens)
+- Leitura do mercado IPCA (3 parágrafos)
+- Leitura do mercado Seguro-Desemprego (2 parágrafos)
+- Agenda do dia (scrape do calendário econômico)
+- Destaques corporativos (scrape InfoMoney / Money Times)
+- Síntese Juros/Bolsa/Câmbio/Catalisador (4 blocos)
+
+---
+
+## Arquitetura do Sistema
+
+```
+morning-call/
+├── package.json
+├── vercel.json                  ← cron jobs 7h e 14h
+├── .env                         ← chaves de API (nunca commitar)
+├── .env.example                 ← template sem valores
+│
+├── scripts/
+│   └── generate.js              ← script principal (roda no cron)
+│
+├── lib/
+│   ├── fetchMarket.js           ← Yahoo Finance + CoinGecko
+│   ├── fetchBCB.js              ← API pública do Banco Central
+│   ├── fetchFRED.js             ← FRED API (macro EUA)
+│   ├── fetchNews.js             ← web scraping de notícias
+│   ├── generateAnalysis.js      ← chama Claude API para texto
+│   └── buildHTML.js             ← monta HTML final com template
+│
+├── template/
+│   └── morning-call.html        ← HTML com placeholders {{VARIAVEL}}
+│
+└── public/
+    └── index.html               ← HTML gerado (servido pelo Vercel)
+```
+
+---
+
+## APIs Utilizadas (todas gratuitas ou de baixo custo)
+
+### 1. Yahoo Finance (via yfinance / yahoo-finance2)
+**Custo:** gratuito, sem chave necessária
+**Limite:** generoso para uso diário (centenas de req)
+**Cobertura:** índices, futuros, câmbio, commodities, cripto
+```
+npm install yahoo-finance2
+```
+
+### 2. BCB — Banco Central do Brasil (API pública oficial)
+**Custo:** gratuito, sem chave necessária
+**Documentação:** https://olinda.bcb.gov.br/
+**Endpoints usados:**
+- Selic: `https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1`
+- IPCA-15: `https://api.bcb.gov.br/dados/serie/bcdata.sgs.13522/dados/ultimos/2`
+- Focus (IPCA/Selic projetados): `https://olinda.bcb.gov.br/olinda/servico/Expectativas/...`
+- Câmbio USD/BRL: `https://olinda.bcb.gov.br/olinda/servico/PTAX/...`
+
+### 3. FRED API — Federal Reserve de St. Louis
+**Custo:** gratuito, chave gratuita em fred.stlouisfed.org
+**Cobertura:** initial claims (ICSA), continuing claims (CCSA), PCE, CPI, Payroll
+**Endpoint:** `https://api.stlouisfed.org/fred/series/observations?series_id=ICSA&api_key=CHAVE&file_type=json`
+
+### 4. CoinGecko API
+**Custo:** gratuito sem chave (50 req/min), Pro ~US$129/mês para ilimitado
+**Endpoint:** `https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true`
+
+### 5. Claude API (Anthropic)
+**Custo:** ~US$0,002-0,010 por geração completa (modelo Sonnet)
+**Uso:** gerar texto analítico com base nos dados coletados
+**Estimativa:** 2x/dia = ~US$0,30-0,60/mês
+
+### 6. Web Scraping (notícias corporativas e agenda)
+**Fontes:** InfoMoney, Money Times, BCB calendário, Broadcast
+**Ferramenta:** `npm install cheerio node-fetch`
+**Importante:** scraping light, somente para dados que não têm API
+
+---
+
+## Código do Script Principal
+
+### package.json
+```json
+{
+  "name": "morning-call",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/generate.js",
+    "dev": "node scripts/generate.js --dev"
+  },
+  "dependencies": {
+    "yahoo-finance2": "^2.11.0",
+    "node-fetch": "^3.3.2",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "date-fns": "^3.6.0"
+  }
+}
+```
+
+### vercel.json (cron jobs)
+```json
+{
+  "crons": [
+    {
+      "path": "/api/generate",
+      "schedule": "0 10 * * 1-5"
+    },
+    {
+      "path": "/api/generate",
+      "schedule": "0 17 * * 1-5"
+    }
+  ]
+}
+```
+> Nota: Vercel usa UTC. 10h UTC = 7h BRT (verão) / 11h UTC = 8h BRT (inverno).
+> 17h UTC = 14h BRT (verão). Ajuste conforme horário de verão.
+
+### .env.example
+```
+FRED_API_KEY=sua_chave_aqui
+ANTHROPIC_API_KEY=sua_chave_aqui
+COINGECKO_API_KEY=opcional_para_plano_gratuito
+```
+
+---
+
+## lib/fetchMarket.js
+```javascript
+import yahooFinance from 'yahoo-finance2';
+
+export async function fetchMarketData() {
+  const symbols = {
+    ibov:    '^BVSP',
+    sp500f:  'ES=F',
+    dow30f:  'YM=F',
+    nasdaq:  'NQ=F',
+    rtf:     'RTY=F',
+    vix:     '^VIX',
+    brent:   'BZ=F',
+    wti:     'CL=F',
+    gold:    'GC=F',
+    silver:  'SI=F',
+    copper:  'HG=F',
+    dax:     '^GDAXI',
+    ftse:    '^FTSE',
+    cac40:   '^FCHI',
+    dxy:     'DX-Y.NYB',
+    eurusd:  'EURUSD=X',
+    gbpusd:  'GBPUSD=X',
+    usdjpy:  'JPY=X',
+    t2y:     '^IRX',
+    t10y:    '^TNX',
+    t30y:    '^TYX',
+  };
+
+  const results = {};
+  
+  for (const [key, symbol] of Object.entries(symbols)) {
+    try {
+      const quote = await yahooFinance.quote(symbol);
+      results[key] = {
+        value: quote.regularMarketPrice,
+        change: quote.regularMarketChange,
+        changePercent: quote.regularMarketChangePercent,
+        previousClose: quote.regularMarketPreviousClose,
+      };
+    } catch (e) {
+      console.error(`Erro ao buscar ${key} (${symbol}):`, e.message);
+      results[key] = { value: null, change: null, changePercent: null };
+    }
+  }
+
+  return results;
+}
+```
+
+## lib/fetchBCB.js
+```javascript
+export async function fetchBCBData() {
+  const base = 'https://api.bcb.gov.br/dados/serie/bcdata.sgs';
+
+  async function getSeries(id, n = 2) {
+    const res = await fetch(`${base}.${id}/dados/ultimos/${n}?formato=json`);
+    return res.json();
+  }
+
+  async function getFocus(indicador, suavizado = 'S') {
+    const url = `https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/`
+      + `ExpectativasMercadoAnuais?$top=5&$filter=Indicador eq '${indicador}'`
+      + ` and Suavizado eq '${suavizado}'&$format=json&$select=Data,Mediana`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.value;
+  }
+
+  async function getCambio() {
+    const hoje = new Date().toLocaleDateString('pt-BR').replace(/\//g, '-');
+    const url = `https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/`
+      + `CotacaoDolarDia(dataCotacao=@dataCotacao)?@dataCotacao='${hoje}'`
+      + `&$top=1&$format=json&$select=cotacaoVenda`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.value?.[0]?.cotacaoVenda ?? null;
+  }
+
+  const [selic, ipca15, focusIPCA, focusSelic, usdBRL] = await Promise.all([
+    getSeries(432, 1),
+    getSeries(13522, 2),
+    getFocus('IPCA'),
+    getFocus('Selic'),
+    getCambio(),
+  ]);
+
+  return {
+    selic: selic?.[0]?.valor ?? null,
+    ipca15: {
+      atual: ipca15?.[1]?.valor ?? null,
+      anterior: ipca15?.[0]?.valor ?? null,
+    },
+    focusIPCA: focusIPCA?.[0]?.Mediana ?? null,
+    focusSelic: focusSelic?.[0]?.Mediana ?? null,
+    usdBRL,
+  };
+}
+```
+
+## lib/fetchFRED.js
+```javascript
+export async function fetchFREDData(apiKey) {
+  async function getSeries(id) {
+    const url = `https://api.stlouisfed.org/fred/series/observations`
+      + `?series_id=${id}&api_key=${apiKey}&file_type=json`
+      + `&sort_order=desc&limit=2`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.observations ?? [];
+  }
+
+  const [icsa, ccsa] = await Promise.all([
+    getSeries('ICSA'),   // Initial Claims semanais
+    getSeries('CCSA'),   // Continuing Claims
+  ]);
+
+  return {
+    initialClaims: {
+      atual: parseInt(icsa[0]?.value) ?? null,
+      anterior: parseInt(icsa[1]?.value) ?? null,
+      data: icsa[0]?.date ?? null,
+    },
+    continuingClaims: {
+      valor: parseInt(ccsa[0]?.value) ?? null,
+      data: ccsa[0]?.date ?? null,
+    },
+  };
+}
+```
+
+## lib/fetchNews.js
+```javascript
+import * as cheerio from 'cheerio';
+
+export async function fetchCorporateNews() {
+  // Scraping leve de manchetes do InfoMoney B3
+  const res = await fetch('https://www.infomoney.com.br/mercados/acoes-e-indices/', {
+    headers: { 'User-Agent': 'Mozilla/5.0' }
+  });
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  
+  const headlines = [];
+  $('h2.title-block a, h3.title-block a').each((i, el) => {
+    if (i < 8) headlines.push($(el).text().trim());
+  });
+
+  return headlines;
+}
+
+export async function fetchEconomicCalendar() {
+  // Calendário econômico do Banco Central
+  const hoje = new Date().toISOString().split('T')[0];
+  const url = `https://www.bcb.gov.br/api/servico/sitebcb/calendario-economico?`
+    + `dataInicial=${hoje}&dataFinal=${hoje}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.conteudo ?? [];
+  } catch {
+    return [];
+  }
+}
+```
+
+## lib/generateAnalysis.js
+```javascript
+export async function generateMarketAnalysis(dados, anthropicKey) {
+  const prompt = buildPrompt(dados);
+  
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': anthropicKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      messages: [{
+        role: 'user',
+        content: prompt,
+      }],
+    }),
+  });
+
+  const data = await res.json();
+  const text = data.content[0].text;
+
+  // Resposta deve ser JSON com os campos de texto
+  try {
+    const clean = text.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
+  } catch {
+    return null;
+  }
+}
+
+function buildPrompt(dados) {
+  return `Você é o assistente de análise de mercado de Alcir Arantes, estrategista de investimentos da The Hill Capital / BTG Pactual.
+
+Com base nos dados de mercado abaixo, gere os textos analíticos do Morning Call diário.
+Responda SOMENTE em JSON válido, sem markdown, sem texto fora do JSON.
+
+DADOS DO DIA:
+${JSON.stringify(dados, null, 2)}
+
+Retorne este JSON exato:
+{
+  "panorama": "2 parágrafos de contexto macro do dia, tom jornalístico direto",
+  "manchete": "1 frase-título do relatório, máx 120 caracteres",
+  "bullets_brasil": [
+    {"titulo": "...", "corpo": "..."},
+    {"titulo": "...", "corpo": "..."}
+  ],
+  "bullets_internacional": [
+    {"titulo": "...", "corpo": "..."},
+    {"titulo": "...", "corpo": "..."}
+  ],
+  "leitura_ipca": {
+    "drivers": "o que puxou o número, com dados específicos",
+    "interpretacao": "o que o mercado entendeu",
+    "implicacao": "impacto na Selic e curva de juros"
+  },
+  "sintese": {
+    "juros": "impacto nos juros brasileiros",
+    "bolsa": "impacto no Ibovespa e setores",
+    "cambio": "perspectiva para o real",
+    "catalisador": "o evento que pode mudar o cenário hoje"
+  }
+}
+
+Regras:
+- Nunca usar travessão (—) nem hífen duplo (--)
+- Linguagem direta, sem clichês motivacionais
+- Conectar todos os dados em uma narrativa coerente
+- Tom: analista sênior falando com cliente sofisticado`;
+}
+```
+
+## scripts/generate.js (script principal)
+```javascript
+import 'dotenv/config';
+import { fetchMarketData } from '../lib/fetchMarket.js';
+import { fetchBCBData } from '../lib/fetchBCB.js';
+import { fetchFREDData } from '../lib/fetchFRED.js';
+import { fetchCorporateNews, fetchEconomicCalendar } from '../lib/fetchNews.js';
+import { generateMarketAnalysis } from '../lib/generateAnalysis.js';
+import { buildHTML } from '../lib/buildHTML.js';
+import { writeFileSync } from 'fs';
+
+async function run() {
+  console.log('🔄 Morning Call Generator iniciando...');
+  const timestamp = new Date().toISOString();
+
+  try {
+    // 1. Coleta paralela de todos os dados de mercado
+    console.log('📊 Coletando dados de mercado...');
+    const [market, bcb, fred, news, agenda] = await Promise.all([
+      fetchMarketData(),
+      fetchBCBData(),
+      fetchFREDData(process.env.FRED_API_KEY),
+      fetchCorporateNews(),
+      fetchEconomicCalendar(),
+    ]);
+
+    const dadosCompletos = { market, bcb, fred, news, agenda, timestamp };
+    console.log('✅ Dados coletados com sucesso');
+
+    // 2. Gera análise textual com Claude
+    console.log('🤖 Gerando análise com IA...');
+    const analysis = await generateMarketAnalysis(
+      dadosCompletos,
+      process.env.ANTHROPIC_API_KEY
+    );
+    console.log('✅ Análise gerada');
+
+    // 3. Monta HTML final
+    console.log('🏗️ Montando HTML...');
+    const html = buildHTML({ ...dadosCompletos, analysis });
+
+    // 4. Salva o arquivo
+    writeFileSync('./public/index.html', html, 'utf8');
+    console.log(`✅ Morning Call gerado: ${timestamp}`);
+
+  } catch (error) {
+    console.error('❌ Erro na geração:', error);
+    process.exit(1);
+  }
+}
+
+run();
+```
+
+## api/generate.js (endpoint Vercel para o cron)
+```javascript
+import { run } from '../scripts/generate.js';
+
+export default async function handler(req, res) {
+  // Segurança: só aceita chamada do cron do próprio Vercel
+  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    await run();
+    res.status(200).json({ ok: true, time: new Date().toISOString() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+}
+```
+
+---
+
+## lib/buildHTML.js — Sistema de Template
+
+O HTML atual usa **placeholders** com a sintaxe `{{VARIAVEL}}`.
+A função buildHTML lê o template e substitui cada placeholder pelos dados reais.
+
+### Placeholders no template HTML
+```
+{{DATA_DIA}}           → "26"
+{{DATA_META}}          → "Mar · 2026 · Quinta"
+{{EDICAO}}             → "Edição 26 · Mar 2026"
+{{MANCHETE}}           → texto gerado pela IA
+{{PANORAMA}}           → texto gerado pela IA
+
+{{IBOV_FECH_VAL}}      → "185.424"
+{{IBOV_FECH_CHG}}      → "+1,83%"
+{{IBOV_FECH_CSS}}      → "cup" ou "cdn"
+{{IBOV_NOW_VAL}}       → valor em tempo real
+{{USDBRL_VAL}}         → "5,2367"
+{{SP500F_VAL}}         → "6.542"
+{{BRENT_VAL}}          → "100,97"
+{{SELIC_VAL}}          → "14,75%"
+{{VIX_VAL}}            → "25,12"
+{{BTC_VAL}}            → "69.380"
+
+{{IPCA_RESULTADO}}     → "+0,44%"
+{{IPCA_EXPECTATIVA}}   → "+0,29%"
+{{IPCA_ANTERIOR}}      → "+0,84%"
+{{IPCA_12M}}           → "3,90%"
+{{IPCA_LEITURA}}       → texto gerado pela IA
+
+{{CLAIMS_ATUAL}}       → "210 mil"
+{{CLAIMS_ANTERIOR}}    → "205 mil"
+{{CLAIMS_CONT}}        → "1,819 mi"
+
+... (todos os 47 campos mapeados acima)
+
+{{SINTESE_JUROS}}      → texto gerado pela IA
+{{SINTESE_BOLSA}}      → texto gerado pela IA
+{{SINTESE_CAMBIO}}     → texto gerado pela IA
+{{SINTESE_CATALISADOR}} → texto gerado pela IA
+```
+
+### Exemplo da função buildHTML
+```javascript
+import { readFileSync } from 'fs';
+import { formatBRL, formatPct, cssClass } from './utils.js';
+
+export function buildHTML({ market, bcb, fred, analysis }) {
+  let template = readFileSync('./template/morning-call.html', 'utf8');
+
+  const today = new Date();
+  const diasSemana = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const meses = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+
+  const replacements = {
+    // Data
+    DATA_DIA:   today.getDate().toString(),
+    DATA_META:  `${meses[today.getMonth()]} · ${today.getFullYear()} · ${diasSemana[today.getDay()]}`,
+
+    // Ticker
+    IBOV_FECH_VAL:  market.ibov?.previousClose?.toLocaleString('pt-BR') ?? '--',
+    IBOV_FECH_CHG:  formatPct(market.ibov?.changePercent),
+    IBOV_FECH_CSS:  cssClass(market.ibov?.changePercent),
+    USDBRL_VAL:     bcb.usdBRL?.toFixed(4) ?? '--',
+    SP500F_VAL:     market.sp500f?.value?.toLocaleString('en-US') ?? '--',
+    BRENT_VAL:      market.brent?.value?.toFixed(2) ?? '--',
+    SELIC_VAL:      `${bcb.selic}%`,
+    VIX_VAL:        market.vix?.value?.toFixed(2) ?? '--',
+    BTC_VAL:        market.bitcoin?.value?.toLocaleString('en-US') ?? '--',
+
+    // IPCA
+    IPCA_RESULTADO:   `+${bcb.ipca15.atual}%`,
+    IPCA_ANTERIOR:    `+${bcb.ipca15.anterior}%`,
+
+    // Claims
+    CLAIMS_ATUAL:    `${(fred.initialClaims.atual/1000).toFixed(0)} mil`,
+    CLAIMS_ANTERIOR: `${(fred.initialClaims.anterior/1000).toFixed(0)} mil`,
+    CLAIMS_CONT:     `${(fred.continuingClaims.valor/1000000).toFixed(3)} mi`,
+
+    // Textos gerados por IA
+    MANCHETE:           analysis?.manchete ?? '',
+    PANORAMA:           analysis?.panorama ?? '',
+    SINTESE_JUROS:      analysis?.sintese?.juros ?? '',
+    SINTESE_BOLSA:      analysis?.sintese?.bolsa ?? '',
+    SINTESE_CAMBIO:     analysis?.sintese?.cambio ?? '',
+    SINTESE_CATALISADOR: analysis?.sintese?.catalisador ?? '',
+  };
+
+  for (const [key, value] of Object.entries(replacements)) {
+    template = template.replaceAll(`{{${key}}}`, value ?? '--');
+  }
+
+  return template;
+}
+```
+
+---
+
+## Passo a Passo para Deploy no Vercel
+
+### Pré-requisitos
+- Conta GitHub (github.com)
+- Conta Vercel (vercel.com) — gratuito para projetos estáticos, Pro (US$20/mês) para cron jobs
+- Chave FRED (gratuita em fred.stlouisfed.org/docs/api/api_key.html)
+- Chave Anthropic (console.anthropic.com)
+
+### Passos
+
+1. **Crie o repositório no GitHub**
+   ```
+   Nome: morning-call
+   Visibilidade: Private
+   ```
+
+2. **Faça upload dos arquivos**
+   - Copie toda a estrutura de pastas desta skill
+   - Substitua o template HTML atual pelos placeholders
+
+3. **Configure as variáveis de ambiente no Vercel**
+   ```
+   FRED_API_KEY = sua_chave_fred
+   ANTHROPIC_API_KEY = sua_chave_anthropic
+   CRON_SECRET = string_aleatoria_segura (ex: openssl rand -hex 32)
+   ```
+
+4. **Conecte ao Vercel**
+   - New Project → Import from GitHub → morning-call
+   - Framework: Other
+   - Build Command: `node scripts/generate.js`
+   - Output Directory: `public`
+   - Deploy
+
+5. **Plano necessário**
+   - Cron Jobs requerem Vercel Pro (US$20/mês)
+   - Alternativa gratuita: GitHub Actions (cron job no CI/CD, completamente gratuito)
+
+### Alternativa 100% gratuita: GitHub Actions
+```yaml
+# .github/workflows/morning-call.yml
+name: Morning Call Generator
+
+on:
+  schedule:
+    - cron: '0 10 * * 1-5'   # 7h BRT (verão)
+    - cron: '0 17 * * 1-5'   # 14h BRT (verão)
+  workflow_dispatch:           # permite rodar manualmente
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - run: node scripts/generate.js
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Commit e push do HTML gerado
+        run: |
+          git config user.email "bot@morning-call"
+          git config user.name "Morning Call Bot"
+          git add public/index.html
+          git commit -m "Morning Call $(date '+%d/%m/%Y %H:%M')" || exit 0
+          git push
+```
+Com GitHub Actions + Vercel hospedando o repositório estático: **custo zero**.
+
+---
+
+## Custo Estimado Total
+
+| Item | Custo |
+|---|---|
+| GitHub Actions (cron) | Gratuito |
+| Vercel (hosting estático) | Gratuito |
+| BCB API | Gratuito |
+| FRED API | Gratuito |
+| Yahoo Finance (via library) | Gratuito |
+| CoinGecko API | Gratuito |
+| Claude API (2x/dia, ~4k tokens) | ~US$ 0,30–0,60/mês |
+| **Total** | **~US$ 0,50/mês** |
+
+---
+
+## Quando Claude Executa Esta Skill Manualmente
+
+Quando o usuário pede "gera o morning call de hoje" sem rodar o script automatizado,
+Claude deve:
+
+1. Usar a ferramenta `web_search` para buscar cada dado nos sites fonte
+2. Montar o objeto de dados no formato esperado
+3. Gerar a análise textual com base nos dados coletados
+4. Atualizar o arquivo HTML substituindo os valores manualmente
+5. Entregar o arquivo atualizado via `present_files`
+
+Este é o fluxo atual que já funciona nas sessões com Alcir.
+O script automatizado apenas faz isso sem intervenção humana.
